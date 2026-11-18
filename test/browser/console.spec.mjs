@@ -282,3 +282,67 @@ test('i18n: non-Chinese locale defaults to English and can switch language in Se
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+test('dark mode: follows system, toggles via header & Settings, persists across reload, and passes WCAG AA', async ({ page, app }) => {
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'auto');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  const autoDarkBg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  expect(autoDarkBg).toBe('rgb(11, 15, 20)');
+
+  await page.emulateMedia({ colorScheme: 'light' });
+  await expect(page.locator('#theme-toggle')).toHaveAttribute('aria-pressed', 'false');
+  await page.locator('#theme-toggle').click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('#theme-toggle')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#0B0F14');
+
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  const savedBg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  expect(savedBg).toBe('rgb(11, 15, 20)');
+
+  for (const [name, route] of [['控制台', 'console'], ['人设库', 'library'], ['规则文件', 'project'], ['测试与记录', 'diagnostics'], ['设置', 'settings']]) {
+    await page.getByRole('button', { name, exact: true }).click();
+    if (route === 'library') await page.getByRole('button', { name: /中性模板/ }).click();
+    await expect(page.locator(`#page-${route}`)).toBeVisible();
+    const results = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
+    expect(results.violations.map(v => ({ id: v.id, targets: v.nodes.map(n => n.target) }))).toEqual([]);
+  }
+
+  await expect(page.locator('#theme-select')).toHaveValue('dark');
+  await page.locator('#theme-select').selectOption('light');
+  await page.locator('#save-theme').click();
+  await expect(page.locator('#theme-status')).toContainText('已更新');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+
+  const state = await (await page.request.get(`${app.url}/api/state`)).json();
+  expect(state.settings.theme).toBe('light');
+});
+
+test('per-tool persona and mode selects report success instead of "pick is not a function"', async ({ page, app }) => {
+  // 回归：抽屉里的 change 处理器曾用 `const pick = el.value` 接住下拉值，
+  // 块级声明遮蔽了模块级导入的 i18n pick()，于是写盘成功后拼提示语时抛
+  // TypeError: pick is not a function，用户只看到一条红条、看不到"已改"。
+  await page.locator('#show-all').check();
+  await selectTool(page, 'pi');
+  const persona = page.locator('#panel-pi select[data-hpersona]');
+  await expect(persona).toBeVisible();
+  const personaId = await persona.locator('option').nth(1).getAttribute('value');
+  expect(personaId, 'isolated HOME must expose at least one persona to switch to').toBeTruthy();
+  const personaWrite = page.waitForResponse(r => r.url().includes('/api/harness') && r.request().method() === 'POST');
+  await persona.selectOption(personaId);
+  expect((await personaWrite).ok()).toBe(true);
+  await expect(page.locator('#notice')).toContainText('改用这份人设');
+  await expect(page.locator('#notice')).not.toHaveClass(/error/);
+
+  const mode = page.locator('#panel-pi select[data-hmode]');
+  const modeWrite = page.waitForResponse(r => r.url().includes('/api/harness') && r.request().method() === 'POST');
+  await mode.selectOption('append');
+  expect((await modeWrite).ok()).toBe(true);
+  await expect(page.locator('#notice')).toContainText('的力度改为');
+  await expect(page.locator('#notice')).toHaveClass(/\bgood\b/);
+
+  const state = await (await page.request.get(`${app.url}/api/state`)).json();
+  const pi = state.harnesses.find(h => h.id === 'pi');
+  expect(pi).toMatchObject({ persona: personaId, personaFrom: 'override', mode: 'append', modeFrom: 'override' });
+});

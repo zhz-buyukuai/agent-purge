@@ -1,4 +1,4 @@
-import { MODE_LABELS, MODE_DESCRIPTIONS, CHANNEL_LABELS, CAPTURE_LABELS, personaName, configurationOf, changed, needsApply, sortedHarnesses, effectLabel as effectLabelFor, harnessTitle, HARNESS_PURGE_EFFECTS, modeAvailability, unsupportedHarnesses, modeLabels, modeDescriptions, channelLabels, captureLabels, harnessPurgeEffects } from './model.mjs';
+import { MODE_LABELS, MODE_DESCRIPTIONS, CHANNEL_LABELS, CAPTURE_LABELS, personaName, configurationOf, changed, needsApply, sortedHarnesses, installedOf as installed, disabledOf as disabledHere, effectLabel as effectLabelFor, harnessTitle, HARNESS_PURGE_EFFECTS, modeAvailability, unsupportedHarnesses, modeLabels, modeDescriptions, channelLabels, captureLabels, harnessPurgeEffects } from './model.mjs';
 import { applyDomI18n, fmtDateTime, fmtNumber, fmtTime, getLocale, isZh, listJoin, pick, setLocale, t } from './i18n.mjs';
 import { verificationEvidence } from './evidence.mjs';
 applyDomI18n();
@@ -6,11 +6,11 @@ applyDomI18n();
 const $ = id => document.getElementById(id);
 // 数据只进入文本节点或固定属性，不解析来自人设/报告的 HTML。
 function node(tag, attrs = {}, ...children) {
-  const el = ['svg', 'path'].includes(tag) ? document.createElementNS('http://www.w3.org/2000/svg', tag) : document.createElement(tag);
+  const el = ['svg', 'path', 'circle'].includes(tag) ? document.createElementNS('http://www.w3.org/2000/svg', tag) : document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
     if (value === null || value === undefined || value === false) continue;
     if (key === 'class') {
-      if (['svg', 'path'].includes(tag)) el.setAttribute('class', String(value));
+      if (['svg', 'path', 'circle'].includes(tag)) el.setAttribute('class', String(value));
       else el.className = value;
     }
     else if (key === 'checked' || key === 'hidden' || key === 'disabled') el[key] = Boolean(value);
@@ -21,6 +21,47 @@ function node(tag, attrs = {}, ...children) {
   }
   return el;
 }
+
+// 声明放在主题代码之前：resolvedTheme() 的默认参数会读 state，先声明就不会有人以后在 applyTheme
+// 之前调用它时踩到 TDZ（当前 applyTheme 会先写 data-theme，默认参数短路，暂时读不到 state）
+let state, base, draft, editor = null, editorBaseline = '', busy = false, activePage = 'console', expanded = null;
+let capture = null, draftConflict = false, project = null;
+const themeMedia = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+const normalizeTheme = value => (value === 'light' || value === 'dark' ? value : 'auto');
+function resolvedTheme(setting = document.documentElement.dataset.theme || state?.settings?.theme || 'auto') {
+  const mode = normalizeTheme(setting);
+  if (mode === 'dark' || mode === 'light') return mode;
+  return themeMedia?.matches ? 'dark' : 'light';
+}
+function updateThemeToggle() {
+  const btn = $('theme-toggle');
+  if (!btn) return;
+  const isDark = resolvedTheme() === 'dark';
+  const label = isDark ? t('theme.toLight') : t('theme.toDark');
+  btn.setAttribute('title', label);
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('aria-pressed', String(isDark));
+  const svg = isDark
+    ? node('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true' },
+        node('circle', { cx: '12', cy: '12', r: '4' }),
+        node('path', { d: 'M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41' }))
+    : node('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true' },
+        node('path', { d: 'M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z' }));
+  btn.replaceChildren(svg);
+}
+function applyTheme(setting) {
+  const mode = normalizeTheme(setting);
+  document.documentElement.dataset.theme = mode;
+  const actual = resolvedTheme(mode);
+  document.querySelector('meta[name="color-scheme"]')?.setAttribute('content', mode === 'auto' ? 'light dark' : actual);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', actual === 'dark' ? '#0B0F14' : '#F7F8FA');
+  document.querySelector('meta[name="ap-theme"]')?.setAttribute('content', mode);
+  updateThemeToggle();
+}
+applyTheme(document.documentElement.dataset.theme || document.querySelector('meta[name="ap-theme"]')?.getAttribute('content') || 'auto');
+themeMedia?.addEventListener?.('change', () => {
+  if (normalizeTheme(state?.settings?.theme || document.documentElement.dataset.theme) === 'auto') applyTheme('auto');
+});
 
 const chip = (label, kind = '', title = null) => node('span', { class: `chip ${kind}`, title }, label);
 const fmt = n => fmtNumber(n);
@@ -49,8 +90,6 @@ const harnessIcon = (id, size = 22) => {
   return node('img', { class: `tool-icon${big}`, src: `assets/${file}?v=2`, alt: '', width: String(size), height: String(size) });
 };
 
-let state, base, draft, editor = null, editorBaseline = '', busy = false, activePage = 'console', expanded = null;
-let capture = null, draftConflict = false, project = null;
 
 const CHANNELS = ['install', 'slash', 'shim', 'project'];
 const installSourceLabel = src => ({
@@ -180,6 +219,7 @@ async function refresh({ resetDraft = false } = {}) {
     setLocale(fresh.locale);
     applyDomI18n();
   }
+  applyTheme(fresh.settings?.theme || 'auto');
   base = configurationOf(state);
   if (!preserve) draft = { ...base };
   setConnection(t('conn.connected', { time: fmtTime(Date.now()) }), 'is-live');
@@ -231,6 +271,7 @@ function render() {
   $('diagnostic-state').textContent = JSON.stringify({ active: state.active, mode: state.defaults.mode, armed: state.armed, pausedInstalls: state.pausedInstalls, reconciled: state.reconciled, revision: state.lastApply?.revision, runtimeConfirmed: state.lastApply?.runtimeConfirmed }, null, 2);
 
   $('version-badge').textContent = `v${state.version || pick('未知', 'unknown')}`;
+  updateThemeToggle();
   renderConfigControls(); renderHarnesses(); renderPersonas(); renderReport(); renderSettings();
   renderEditorStatus(); lockControls();
 }
@@ -279,12 +320,22 @@ function scopeLine() {
 function toolStatus(h) {
   const on = consoleOn(h);
   const failed = state.lastApply?.results?.some(r => r.harness === h.id && r.status === 'failed');
-  const installed = Boolean(h.found || h.homeExists);
   if (on && failed) return { key: 'failed', label: pick('需重试', 'Retry needed') };
   if (on && state.paused) return { key: 'paused', label: pick('已暂停', 'Paused') };
   if (on && h.mode === 'off') return { key: 'paused', label: pick('单独暂停', 'Tool paused') };
   if (on) return { key: 'on', label: pick('已接管', 'Managed') };
-  if (!installed) return { key: 'missing', label: pick('未安装', 'Not installed') };
+  // 未来支持：还没确定能不能接管的家（matrix 里 planned = true）不画成「可接管」，
+  // 也不画成「未安装 / 缺命令行」——那是本机环境状态，不是能力状态。
+  if (h.planned) return { key: 'future', label: pick('未来支持', 'Planned') };
+  // 只剩残留配置（CLI 早卸了）不算装上；真装了但缺命令行的家下面还有专门一档。
+  if (!installed(h)) return { key: 'missing', label: h.residueOnly ? pick('残留配置', 'Leftovers only') : pick('未安装', 'Not installed') };
+  // 这家被单独关掉时注入不生效（resolveActivation 直接 stop('harness-disabled')），
+  // 开关也不是「可接管」那一路：必须如实标「已关闭」。
+  if (disabledHere(h)) return { key: 'disabled', label: pick('已关闭', 'Disabled') };
+  // 配置目录在、但命令不在，而且没有任何可点通道：真实状态是「装了配置、缺 CLI」，
+  // 不是「可接管」——给一个点了必然报错的开关比不给更糟。
+  const noChannel = !availableChannels(h).length;
+  if (noChannel && !h.caps?.launch?.ok && !h.bin) return { key: 'missing', label: pick('缺命令行', 'No CLI found') };
   return { key: 'off', label: pick('可接管', 'Ready') };
 }
 
@@ -306,22 +357,32 @@ function availableChannels(h) {
   return CHANNELS.filter(c => c !== 'project' && (h.caps?.[c]?.ok || channelOn(h, c)));
 }
 const channelOn = (h, c) => c === 'project' ? Boolean(h.projectOn) : h.armed.includes(c);
-const isReadyTarget = h => consoleOn(h) || availableChannels(h).length > 0;
+// 默认列表只列「真装了」的家：没装的家既不能接管也不能点名启动，塞进列表只会误导。
+// planned 的家例外——用户需要知道「这家未来会支持」。
+const isReadyTarget = h => consoleOn(h) || Boolean(h.planned) || (installed(h) && (availableChannels(h).length > 0 || Boolean(h.caps?.launch?.ok)));
 
 let targetFilter = 'all';
 let targetQuery = '';
 let visibleTargets = [];
 
 const targetRows = () => [...$('harness-list').querySelectorAll('.target-row')];
-const installed = h => Boolean(h.found || h.homeExists);
+// 分组只看真实状态：装没装、这家是不是被单独关掉、有没有可写通道。
+// 以前只问「有没有可写通道」，于是没装的家（只剩残留配置、或配置目录都不存在）也被画成「可接管」，
+// 开关点开也写不进任何地方。
 const targetGroup = h => {
   if (consoleOn(h)) return 'on';
+  // 还没确认能不能接管的家（kiro / goose）不算「未安装」——那是能力状态，不是本机环境状态。
+  if (h.planned) return 'future';
+  if (!installed(h)) return 'missing';
+  if (disabledHere(h)) return 'disabled';
   if (availableChannels(h).length > 0) return 'ready';
   return 'missing';
 };
 const groupOrder = () => [
   ['on', pick('已接管', 'Managed')],
   ['ready', pick('可接管', 'Ready')],
+  ['disabled', pick('已关闭', 'Disabled')],
+  ['future', pick('未来支持', 'Planned')],
   ['missing', pick('未安装', 'Not installed')],
 ];
 
@@ -338,30 +399,44 @@ let lastGridKey = '';
 
 function targetRow(h, index = 0, animate = false) {
   const status = toolStatus(h);
-  const installed = Boolean(h.found || h.homeExists);
   const on = consoleOn(h);
   const active = h.id === expanded;
   const rulesOnly = targetGroup(h) === 'rules';
   const avail = modeAvailability(h);
   const modeLabel = h.mode === 'off' ? pick('已暂停', 'Paused') : (MODE_LABELS[h.mode] || (avail.preferred ? MODE_LABELS[avail.preferred] : MODE_LABELS.replace));
-  const customPersona = h.personaFrom === 'override' ? state.personas.find(p => p.id === h.persona) : null;
-  const metaText = customPersona ? pick(`专属：${personaName(customPersona)}`, `Custom: ${personaName(customPersona)}`) : modeLabel;
 
   const statusLabel = rulesOnly && !on ? pick('项目文件', 'Rule file') : status.label;
-  const statusChipClass = status.key === 'on' ? 'is-on' : status.key === 'paused' ? 'is-warn' : status.key === 'failed' ? 'is-bad' : '';
-  const rightControl = rulesOnly
-    ? chip(pick('仅项目规则', 'Project rules only'), '')
-    : node('label', { class: 'switch', title: pick(`${on ? '关闭' : '开启'} ${harnessTitle(h.id)} 接管`, `${on ? 'Disable' : 'Enable'} ${harnessTitle(h.id)}`) },
+  const statusChipClass = status.key === 'on' ? 'is-on' : status.key === 'paused' ? 'is-warn' : status.key === 'failed' ? 'is-bad' : status.key === 'future' ? 'is-future' : '';
+  // 没有任何可点通道时不给开关：要么点名启动（复制命令），要么如实说明缺什么。
+  // 以前这里照样画开关，点了必然报错——比没有开关更糟。
+  const noChannel = !availableChannels(h).length;
+  const launchOnly = !on && noChannel && Boolean(h.caps?.launch?.ok);
+  const switchTitle = pick(`${on ? '关闭' : '开启'} ${harnessTitle(h.id)} 接管`, `${on ? 'Disable' : 'Enable'} ${harnessTitle(h.id)}`);
+  const rightControl = on
+    ? node('label', { class: 'switch', title: switchTitle },
         node('input', {
-          type: 'checkbox', 'data-toggle': h.id, checked: on,
-          disabled: !installed && !on,
-          'aria-label': pick(`${on ? '关闭' : '开启'} ${harnessTitle(h.id)} 的人设接管`, `${on ? 'Disable' : 'Enable'} persona injection for ${harnessTitle(h.id)}`)
+          type: 'checkbox', 'data-toggle': h.id, checked: true,
+          'aria-label': switchTitle
+        }),
+        node('span', { class: 'switch-track', 'aria-hidden': 'true' })
+      )
+    : launchOnly
+    ? chip(pick('点名启动', 'Launch only'), '', h.caps.launch.how || pick(`用 agent-purge ${h.id} 启动`, `Start with agent-purge ${h.id}`))
+    : noChannel
+    ? chip(pick('缺命令行', 'No CLI'), '', h.caps?.launch?.why || h.caps?.shim?.why || pick('没有可用的接管方式', 'No usable takeover'))
+    : rulesOnly
+    ? chip(pick('仅项目规则', 'Project rules only'), '')
+    : node('label', { class: 'switch', title: switchTitle },
+        node('input', {
+          type: 'checkbox', 'data-toggle': h.id, checked: false,
+          disabled: !installed(h),
+          'aria-label': pick(`开启 ${harnessTitle(h.id)} 的人设接管`, `Enable persona injection for ${harnessTitle(h.id)}`)
         }),
         node('span', { class: 'switch-track', 'aria-hidden': 'true' })
       );
 
   return node('article', {
-    class: `tool-card target-row${active ? ' is-active' : ''}${on ? ' is-on' : ''}${!installed ? ' is-missing' : ''}${animate ? ' is-entering' : ''}`,
+    class: `tool-card target-row${active ? ' is-active' : ''}${on ? ' is-on' : ''}${!installed(h) ? ' is-missing' : ''}${status.key === 'future' ? ' is-future' : ''}${animate ? ' is-entering' : ''}`,
     'data-id': h.id, 'data-expand': h.id
   },
     node('div', { class: 'tool-card-top' },
@@ -378,7 +453,7 @@ function targetRow(h, index = 0, animate = false) {
       node('div', { class: 'tool-card-meta' },
         node('span', { class: 'tool-card-index', 'aria-hidden': 'true' }, String(index + 1).padStart(2, '0')),
         chip(statusLabel, statusChipClass),
-        node('span', {}, metaText)
+        node('span', {}, modeLabel)
       ),
       node('button', {
         type: 'button', class: 'tool-card-more', 'data-expand': h.id,
@@ -523,6 +598,38 @@ function unavailableDetail(h) {
   );
 }
 
+/**
+ * 没有常驻/命令/插件落点时的「接管方式」正文。
+ * 以前这里是一句硬编码的「这家仅支持项目级规则文件」——对 launch-arg 型的家（qwen/kimi/kiro/
+ * goose/auggie/continue/qoder）纯属谎报：它们靠点名启动注入，而且其中好几家连项目规则
+ * 文件都没有。现在按 caps 说真话：能注入就给出命令，不能注入就报真实原因。
+ */
+function launchRow(h) {
+  const cap = h.caps?.launch || {};
+  if (!cap.backend) {
+    return node('p', { class: 'muted' }, h.reason || cap.why || pick('这家没有可用的注入通道。', 'No usable injection channel for this tool.'));
+  }
+  const cmd = `agent-purge ${h.id}`;
+  return node('div', { class: 'channel-item' },
+    node('div', { class: 'channel-head' },
+      node('div', { class: 'channel-name' }, pick('点名启动', 'Launch'),
+        chip(cap.ok ? pick('可用', 'Available') : pick('装好 CLI 就能用', 'Needs the CLI'), cap.ok ? 'is-on' : 'is-warn')),
+      node('button', {
+        type: 'button', class: 'btn btn-sm btn-ghost', 'data-copy-launch': h.id,
+        title: pick('复制启动命令', 'Copy launch command')
+      }, pick('复制命令', 'Copy'))
+    ),
+    node('div', { class: 'channel-why' },
+      pick(
+        `用它启动就带人设：${cap.how || '启动时注入'}。不改配置、不接管 PATH、不依赖 /purge，但只有从这里启动的会话生效。`,
+        `Starting this way carries the persona: ${cap.how || 'injected at launch'}. No config change, no PATH takeover, no /purge — but only sessions started this way are affected.`,
+      ),
+      cap.ok ? null : node('span', { class: 'hint' }, ` ${cap.why}`)
+    ),
+    node('code', { class: 'path' }, cmd)
+  );
+}
+
 function modeControl(h) {
   const avail = modeAvailability(h);
   const usable = ['replace', 'strict', 'append'].filter(m => avail.supported.has(m));
@@ -594,16 +701,67 @@ function technicalDetail(h) {
       node('p', {}, node('strong', {}, pick('热切机制', 'Hot-switch')), h.caps?.hot?.how || h.caps?.hot?.why || pick('启动时读取一次，改完要重开会话。', 'Read once at startup; restart session after changes.')),
       node('p', {}, node('strong', {}, pick('配置路径', 'Config path')), node('code', { class: 'path' }, h.persistFile || h.home || '—')),
       h.install && h.install !== h.home ? node('p', {}, node('strong', {}, pick('安装目录', 'Install dir')), node('code', { class: 'path' }, h.install), h.installSource ? ` · ${installSourceLabel(h.installSource)}` : '') : null,
-      node('p', {}, node('strong', {}, pick('命令入口', 'Command')), node('code', { class: 'path' }, h.bin || pick('未发现', 'Not found')))
+      node('p', {}, node('strong', {}, pick('命令入口', 'Command')), node('code', { class: 'path' }, h.bin || pick('未发现', 'Not found'))),
+      // 内置护栏是实测的：没抓过包的家显式标「未测」，别用「已净化干净」这种无法证伪的话
+      safetyLine(h),
+      purgeScopeLine(h)
     )
   );
+}
+/**
+ * 内置护栏（拒答 / 防破甲 / 防泄密 / 防注入）的实测数字。
+ * 数字必须是抓包实测的。没测的家显式标「未测」—— 「没测」和「已清干净」绝不能长得一样。
+ */
+function safetyLine(h) {
+  const s = h.safety;
+  if (!s) return null;
+  if (typeof s.off !== 'number') {
+    // 没抓过包就说没抓过：留白会让人误以为这家没有护栏
+    return node('p', {}, node('strong', {}, pick('内置护栏', 'Built-in guardrails')),
+      chip(pick('未测', 'not measured'), 'is-warn'),
+      s.note ? node('span', { class: 'hint' }, ` ${s.note}`) : null);
+  }
+  if (s.off === 0) {
+    return node('p', {}, node('strong', {}, pick('内置护栏', 'Built-in guardrails')),
+      pick(`实测 ${fmt(s.off)} 条（本来就没有可删的）`, `${fmt(s.off)} measured (nothing to remove)`));
+  }
+  const left = s.purged;
+  const tone = left > 0 ? 'is-warn' : 'is-on';
+  return node('p', {},
+    node('strong', {}, pick('内置护栏', 'Built-in guardrails')),
+    pick(`${fmt(s.off)} 条 → 剩 ${fmt(left)} 条`, `${fmt(s.off)} → ${fmt(left)} left`),
+    ' ',
+    chip(left === 0 ? pick('已清空', 'cleared') : pick('仍有残留', 'residual'), tone),
+    s.note ? node('span', { class: 'hint' }, ` ${s.note}`) : null
+  );
+}
+
+
+/**
+ * 净化范围：整份替换 / 只换身份段 / 只能追加。
+ * 这三者对外观感完全不同 —— 「整份替换」是宿主身份真的没了，
+ * 「只换身份段」是身份没了但工具说明还在，「追加」是身份还在。
+ */
+function purgeScopeLine(h) {
+  const scope = h.replaceScope;
+  if (!scope) return null;
+  const label = pick('净化范围', 'Purge scope');
+  if (scope === 'entire-system') {
+    return node('p', {}, node('strong', {}, label),
+      pick('整份替换：宿主原生 system 提示词被整段换掉，只剩人设（外加工具说明）', 'Whole-system replace: the native system prompt is swapped out entirely; only the persona (plus tool docs) remains'));
+  }
+  if (scope === 'identity-only') {
+    return node('p', {}, node('strong', {}, label),
+      pick('只换身份段：身份句没了，工具说明与运行规则仍由宿主写入', 'Identity-only: the identity sentence is gone, but tool docs and runtime rules still come from the host'));
+  }
+  return node('p', {}, node('strong', {}, label),
+    pick('只能追加：宿主没有整段入口，原生身份仍在提示词里', 'Append only: no full entry point, so the native identity stays in the prompt'));
 }
 
 function toolPanel(h) {
   const channels = availableChannels(h);
   const info = HARNESS_PURGE_EFFECTS[h.id];
   const effect = consoleOn(h) ? effectLabelSafe(h) : null;
-  const installed = Boolean(h.found || h.homeExists);
   const ev = captureFor(h.id) ? evidenceOf(captureFor(h.id)) : null;
 
   const personaOptions = [new Option(pick(`跟随全局（${personaName(state.personas.find(p => p.id === state.persona))}）`, `Follow global (${personaName(state.personas.find(p => p.id === state.persona))})`), '')];
@@ -612,13 +770,23 @@ function toolPanel(h) {
   personaSelect.value = h.personaFrom === 'override' ? h.persona : '';
 
   const rulesOnly = targetGroup(h) === 'rules';
-  const toggleBtn = rulesOnly
+  // 常驻/命令/插件都没落点、但点名启动能注入：主按钮改成复制启动命令，而不是点一下必然报错
+  const launchOnly = !consoleOn(h) && !channels.length && Boolean(h.caps?.launch?.ok);
+  const launchCmd = `agent-purge ${h.id}`;
+  const toggleBtn = launchOnly
+    ? node('button', {
+        type: 'button',
+        class: 'btn btn-primary',
+        'data-copy-launch': h.id,
+        title: pick('复制启动命令；用它启动即带人设，不需要预先开任何开关', 'Copy the launch command; starting this way carries the persona with no switch to enable')
+      }, pick('复制启动命令', 'Copy launch command'))
+    : rulesOnly
     ? null
     : node('button', {
         type: 'button',
         class: `btn ${consoleOn(h) ? 'btn-ghost' : 'btn-primary'}`,
         'data-drawer-toggle': h.id,
-        disabled: !installed && !consoleOn(h)
+        disabled: !installed(h) && !consoleOn(h)
       }, consoleOn(h) ? pick('关闭接管', 'Disable') : pick('开启接管', 'Enable'));
 
   const closeIcon = node('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true' },
@@ -642,10 +810,9 @@ function toolPanel(h) {
         harnessIcon(h.id, 34),
         node('div', {},
           node('h2', {}, harnessTitle(h.id),
-            h.personaFrom === 'override' ? node('span', { class: 'tool-flag is-accent' }, pick('专属', 'Custom')) : null,
             state.defaultsSet && state.defaults.harness === h.id ? node('span', { class: 'tool-flag' }, pick('默认', 'Default')) : null
           ),
-          node('p', {}, `${toolSub(h)} · ${installed ? pick('本机已安装', 'Installed') : pick('本机没装', 'Not installed')}`)
+          node('p', {}, `${toolSub(h)} · ${installed(h) ? pick('本机已安装', 'Installed') : pick('本机没装', 'Not installed')}`)
         )
       ),
       toggleBtn ? node('div', { class: 'detail-actions' }, toggleBtn) : null
@@ -681,7 +848,7 @@ function toolPanel(h) {
       node('h3', {}, pick('02 // 接管方式', '02 // Channels')),
       channels.length
         ? node('div', { class: `channel-list channel-count-${channels.length}` }, channels.map(c => channelRow(h, c)))
-        : node('p', { class: 'muted' }, h.reason || pick('这家仅支持项目级规则文件，请到「项目规则」页写入。', 'Supports project rule files only; configure on the Rule Files page.')),
+        : launchRow(h),
       unavailableDetail(h)
     ),
     node('div', { class: 'panel-foot' },
@@ -689,7 +856,7 @@ function toolPanel(h) {
         node('h3', { class: 'panel-foot-title' }, pick('03 // 安全试跑', '03 // Dry-Run Verification'))
       ),
       node('div', { class: 'verify-bar' },
-        node('button', { type: 'button', class: 'btn btn-ghost btn-sm', 'data-verify': h.id, disabled: !installed, title: pick('在临时目录里跑一次，不读取也不修改当前会话', 'Run once in an isolated temp dir without touching active sessions') }, pick('试跑一次', 'Verify Once')),
+        node('button', { type: 'button', class: 'btn btn-ghost btn-sm', 'data-verify': h.id, disabled: !installed(h), title: pick('在临时目录里跑一次，不读取也不修改当前会话', 'Run once in an isolated temp dir without touching active sessions') }, pick('试跑一次', 'Verify Once')),
         ev ? chip(ev.label, ev.chipClass) : null,
         node('span', { class: 'verify-note' }, verifyNote(h))
       ),
@@ -1028,6 +1195,7 @@ function renderSettings() {
   const s = state?.settings;
   if (!s) return;
   if ($('language-select')) $('language-select').value = s.language || 'auto';
+  if ($('theme-select')) $('theme-select').value = s.theme || 'auto';
   const desktop = s.desktop || {};
   const webdav = s.webdav || {};
   $('close-action').value = desktop.exitOnClose === false ? 'stay' : 'exit';
@@ -1068,6 +1236,41 @@ $('save-language')?.addEventListener('click', () => operation(async () => {
   settingsStatus('language-status', t('settings.languageSaved'), 'good');
   notify(t('settings.languageSaved'), 'good');
 }));
+
+$('save-theme')?.addEventListener('click', () => operation(async () => {
+  themeSeq += 1;
+  const result = await api('settings', { theme: $('theme-select').value });
+  state.settings = result.settings;
+  applyTheme(result.settings.theme);
+  renderSettings();
+  settingsStatus('theme-status', t('settings.themeSaved'), 'good');
+  notify(t('settings.themeSaved'), 'good');
+}));
+
+let themeSeq = 0;
+$('theme-toggle')?.addEventListener('click', async () => {
+  if (busy) return;
+  const seq = ++themeSeq;
+  const prev = normalizeTheme(state?.settings?.theme || document.documentElement.dataset.theme);
+  const next = resolvedTheme(prev) === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  if (state?.settings) state.settings.theme = next;
+  if ($('theme-select')) $('theme-select').value = next;
+  try {
+    const result = await api('settings', { theme: next });
+    if (seq !== themeSeq) return;
+    if (state) state.settings = result.settings;
+    applyTheme(result.settings.theme);
+    if ($('theme-select')) $('theme-select').value = result.settings.theme;
+    settingsStatus('theme-status', '');
+  } catch (error) {
+    if (seq !== themeSeq) return;
+    if (state?.settings) state.settings.theme = prev;
+    applyTheme(prev);
+    if ($('theme-select')) $('theme-select').value = prev;
+    notify(error.message, 'error');
+  }
+});
 
 $('save-desktop')?.addEventListener('click', () => operation(async () => {
   const result = await api('settings', {
@@ -1168,7 +1371,7 @@ $('persona-select').addEventListener('change', () => {
   renderConfigControls();
 });
 document.querySelectorAll('[name=mode]').forEach(el => el.addEventListener('change', () => { draft.mode = mode(); renderConfigControls(); }));
-$('quick-pull-btn')?.addEventListener('click', () => $('import-dialog')?.showModal());
+$('quick-pull-btn')?.addEventListener('click', () => openImportDialog());
 $('quick-new-btn')?.addEventListener('click', () => { navigate('library'); $('new-persona')?.click(); });
 $('edit-current').addEventListener('click', () => { openEditor(draft.persona); navigate('library'); });
 $('new-persona').addEventListener('click', () => openEditor(''));
@@ -1179,7 +1382,7 @@ $('batch-actions-select')?.addEventListener('change', async e => {
   e.target.value = '';
   operation(async () => {
     if (val === 'enable-ready') {
-      const ready = state.harnesses.filter(h => h.supported && (h.found || h.homeExists) && !consoleOn(h));
+      const ready = state.harnesses.filter(h => h.supported && installed(h) && !disabledHere(h) && !consoleOn(h));
       const done = [];
       for (const h of ready) {
         const channel = ['install', 'slash', 'shim'].find(c => h.caps?.[c]?.ok);
@@ -1300,6 +1503,15 @@ const onToolsClick = async e => {
     });
     return;
   }
+  const copyLaunch = e.target.closest('[data-copy-launch]');
+  if (copyLaunch) {
+    const id = copyLaunch.dataset.copyLaunch;
+    const cmd = `agent-purge ${id}`;
+    navigator.clipboard?.writeText(cmd)
+      .then(() => notify(pick(`已复制：${cmd}（在这个终端里运行即带人设）`, `Copied: ${cmd} (run it in a terminal to start with the persona)`), 'good'))
+      .catch(() => notify(pick(`复制失败，手动运行：${cmd}`, `Copy failed; run it manually: ${cmd}`), 'warn'));
+    return;
+  }
   const channelBtn = e.target.closest('[data-channel]');
   if (channelBtn) {
     operation(async () => {
@@ -1372,20 +1584,21 @@ function confirmHarnessArm(id) {
 const onToolsChange = async e => {
   const el = e.target;
   if (el.dataset.hpersona) {
-    const pick = el.value;
+    // 这里不能叫 pick：块级同名声明会把模块级导入的 pick() 遮蔽成字符串，调用时抛 "pick is not a function"
+    const value = el.value;
     operation(async () => {
-      const result = await api('harness', { harness: el.dataset.hpersona, persona: pick || 'follow' });
+      const result = await api('harness', { harness: el.dataset.hpersona, persona: value || 'follow' });
       await refresh();
-      announce(result, pick ? pick(`${harnessTitle(el.dataset.hpersona)} 改用这份人设。`, `${harnessTitle(el.dataset.hpersona)} now uses this persona.`) : pick(`${harnessTitle(el.dataset.hpersona)} 恢复跟随全局人设。`, `${harnessTitle(el.dataset.hpersona)} now follows global persona.`));
+      announce(result, value ? pick(`${harnessTitle(el.dataset.hpersona)} 改用这份人设。`, `${harnessTitle(el.dataset.hpersona)} now uses this persona.`) : pick(`${harnessTitle(el.dataset.hpersona)} 恢复跟随全局人设。`, `${harnessTitle(el.dataset.hpersona)} now follows global persona.`));
     });
     return;
   }
   if (el.dataset.hmode) {
-    const pick = el.value;
+    const value = el.value;
     operation(async () => {
-      const result = await api('harness', { harness: el.dataset.hmode, mode: pick || 'follow' });
+      const result = await api('harness', { harness: el.dataset.hmode, mode: value || 'follow' });
       await refresh();
-      announce(result, pick === 'follow' ? pick(`${harnessTitle(el.dataset.hmode)} 恢复跟随全局力度。`, `${harnessTitle(el.dataset.hmode)} now follows global mode.`) : pick(`${harnessTitle(el.dataset.hmode)} 的力度改为「${MODE_LABELS[pick] || pick}」。`, `${harnessTitle(el.dataset.hmode)} mode set to "${MODE_LABELS[pick] || pick}".`));
+      announce(result, value === 'follow' ? pick(`${harnessTitle(el.dataset.hmode)} 恢复跟随全局力度。`, `${harnessTitle(el.dataset.hmode)} now follows global mode.`) : pick(`${harnessTitle(el.dataset.hmode)} 的力度改为「${MODE_LABELS[value] || value}」。`, `${harnessTitle(el.dataset.hmode)} mode set to "${MODE_LABELS[value] || value}".`));
     });
     return;
   }
@@ -1424,14 +1637,17 @@ $('delete-persona').addEventListener('click', () => {
 const importDialog = $('import-dialog');
 const importStatus = $('import-status');
 const importSourceInput = $('import-source');
+const importMirrorInput = $('import-mirror');
 const startImportBtn = $('start-import');
-$('pull-personas')?.addEventListener('click', () => {
+function openImportDialog() {
   if (!importDialog) return;
   if (!importSourceInput.value.trim()) importSourceInput.value = 'ZiChuanLan/some-magic';
+  if (importMirrorInput) importMirrorInput.value = state?.settings?.githubMirror || '';
   importStatus.hidden = true; importStatus.className = 'status-box'; importStatus.textContent = '';
   startImportBtn.disabled = false; startImportBtn.textContent = t('import.start');
   importDialog.showModal();
-});
+}
+$('pull-personas')?.addEventListener('click', () => openImportDialog());
 $('close-import')?.addEventListener('click', () => importDialog?.close());
 $('cancel-import')?.addEventListener('click', () => importDialog?.close());
 importDialog?.addEventListener('click', e => {
@@ -1442,13 +1658,17 @@ $('import-form')?.addEventListener('submit', async e => {
   e.preventDefault();
   const source = importSourceInput.value.trim();
   if (!source) return;
+  const mirror = importMirrorInput?.value.trim() ?? '';
   const overwrite = $('import-overwrite').checked;
   startImportBtn.disabled = true; startImportBtn.textContent = t('import.pulling');
   importStatus.hidden = false; importStatus.className = 'status-box';
-  importStatus.textContent = pick(`正在从 ${source} 拉取…`, `Pulling from ${source}…`);
+  importStatus.textContent = mirror
+    ? pick(`正在经镜像 ${mirror} 从 ${source} 拉取…`, `Pulling from ${source} via ${mirror}…`)
+    : pick(`正在从 ${source} 拉取…`, `Pulling from ${source}…`);
   try {
-    const res = await api('persona/import', { source, overwrite });
+    const res = await api('persona/import', { source, mirror, overwrite });
     if (!res.ok) throw new Error(res.error || pick('拉取失败', 'Pull failed'));
+    if (res.settings && state) state.settings = res.settings;
     const { total = 0, imported = [] } = res.result || {};
     importStatus.className = 'status-box success';
     const names = listJoin(imported.map(x => x.name || x.id).slice(0, 3));
@@ -1616,6 +1836,9 @@ window.addEventListener('beforeunload', e => {
   if (wantConfirm || configDirty() || editorDirty()) { e.preventDefault(); e.returnValue = ''; }
 });
 
+// 原生窗口宿主（WebView2）关窗前会问这里：WebView2 不会自己跑 beforeunload，
+// 未保存草稿的判断搬到显式入口；要不要弹确认由宿主按设置页的选项决定。
+window.__apDirty = () => configDirty() || editorDirty();
 refresh().then(() => navigate(pageFromHash(), { replace: true, focus: false })).then(() => checkAppUpdate(false)).catch(error => {
   setConnection(t('conn.disconnected'), 'is-down');
   notify(t('conn.disconnectedNotice', { error: error.message }), 'error');

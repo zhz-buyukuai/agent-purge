@@ -457,6 +457,17 @@ async function state(withVersions, ctx = {}) {
 			preferredMode: m.preferredMode ?? null,
 			reason: m.reason ?? null,
 			supported: m.class !== "unsupported",
+			// 实测的内置护栏数：off = 未注入时，purged = 注入后。null = 没抓包，UI 不画
+			safety: m.safety ?? null,
+			// 净化范围：entire-system / identity-only / append。UI 靠它区分「身份真没了」和「只是追加」
+			replaceScope: m.replaceScope ?? null,
+			// 净化方式：unverified = 没确定能不能接管，UI 灰掉标「未来支持」，不许画成「可接管」
+			purgeKind: m.purgeKind ?? null,
+			// 未来支持：还没确定能不能接管（kiro 没测到、goose 只能追加）。UI 灰掉，不画成「可接管」
+			planned: Boolean(m.planned),
+			plannedNote: m.plannedNote ?? null,
+			// 净化方式：unverified = 没确定能不能接管，UI 灰掉标「未来支持」，不许画成「可接管」
+			purgeKind: m.purgeKind ?? null,
 			oneshot: Boolean(oneshots[id]),
 			layer: LAYER[id] ?? (m.class === "unsupported" ? null : "sys"),
 			found: Boolean(d.found),
@@ -465,6 +476,8 @@ async function state(withVersions, ctx = {}) {
 			install: d.install ?? null,
 			installSource: d.installSource ?? null,
 			homeExists: Boolean(d.homeExists),
+			// 只有配置目录、没有程序本体：前端据此区分「真装了」和「只剩残留」
+			residueOnly: Boolean(d.residueOnly),
 			persistable: Boolean(inst),
 			installed: Boolean(inst?.installed),
 			persistFile: inst?.file ?? null,
@@ -679,7 +692,7 @@ function projectView(input, { scope = "project", persona = null } = {}) {
 	return { scope: "project", dir, cwd: process.cwd(), targets, projects: projectOverview(DATA, dir), history, recent: recent.slice(0, 8), persona: personaId, activePersona: activeId, paused: loadState(DATA).state.default?.mode === "off" };
 }
 
-const RULES_ONLY = new Set(["cursor", "devin", "gemini", "copilot", "amp", "cline", "roo"]);
+const RULES_ONLY = new Set(["cursor", "devin", "copilot", "amp", "cline", "roo"]);
 
 function projectReaders(file) {
 	return Object.keys(projectTargets).filter(id => projectTargets[id] === file);
@@ -784,7 +797,7 @@ function settingsView(ctx = {}) {
 
 function saveSettingsView(payload, ctx = {}) {
 	if (!plainObject(payload)) throw httpError(400, "设置载荷应为对象");
-	const next = saveSettings(DATA, { language: payload.language, desktop: payload.desktop, webdav: payload.webdav });
+	const next = saveSettings(DATA, { language: payload.language, theme: payload.theme, githubMirror: payload.githubMirror, desktop: payload.desktop, webdav: payload.webdav });
 	// 桌面形态下 exitPolicy 每次现读设置，所以改完立刻生效，不需要重启进程；
 	// 只有终端托管的服务不吃这条设置，如实说明。
 	return {
@@ -891,9 +904,13 @@ async function handleImportPersonas(payload) {
 	const source = String(payload?.source || "").trim();
 	if (!source) throw httpError(400, "导入源不能为空（请提供 GitHub 仓库如 ZiChuanLan/some-magic 或本地目录）");
 	const overwrite = payload?.overwrite !== false;
-	const { importPersonas } = await import("../lib/persona-import.mjs");
+	const hasMirror = plainObject(payload) && Object.hasOwn(payload, "mirror");
+	const { importPersonas, normalizeMirror } = await import("../lib/persona-import.mjs");
+	let mirror = "";
 	try {
-		const result = await importPersonas(source, DATA, { overwrite });
+		mirror = normalizeMirror(hasMirror ? payload.mirror : settingsOf(loadState(DATA).state).githubMirror);
+		if (hasMirror) saveSettings(DATA, { githubMirror: mirror });
+		const result = await importPersonas(source, DATA, { overwrite, mirror });
 		let applied = null;
 		if (payload?.activateId && getStore().read(payload.activateId)) {
 			applied = applyConfiguration(DATA, { persona: payload.activateId });
@@ -903,6 +920,7 @@ async function handleImportPersonas(payload) {
 			result,
 			personas: getStore().list().map((x) => ({ id: x.id, meta: x.meta, body: x.body, chars: x.body.trim().length })),
 			persona: getStore().activeId(),
+			settings: settingsOf(loadState(DATA).state),
 			applied,
 		};
 	} catch (e) {
@@ -956,7 +974,9 @@ function applyArm(payload) {
 			const pick = ["install", "slash", "shim"].find(channel => caps[channel]?.ok);
 			if (!pick) return { error: "这个执行器暂时没有可用的接管方式，展开细节看原因。" };
 			// 已经是这个通道就什么都不做，开关是幂等的
-			if (current.includes(pick)) return { ok: true, results: [], channel: pick, done: [], skipped: [] };
+			// 被 disabledHarnesses 关掉的家：armed 里可能还留着通道，但注入不生效，不能当「已开启」直接跳过
+			const disabled = (st.disabledHarnesses ?? []).includes(payload.harness);
+			if (current.includes(pick) && !disabled) return { ok: true, results: [], channel: pick, done: [], skipped: [] };
 			const result = changeChannel(DATA, { harness: payload.harness, channel: pick, enabled: true });
 			return { ok: result.ok, results: [result], channel: pick, done: result.ok ? [result] : [], skipped: result.ok ? [] : [result.error] };
 		}
@@ -997,10 +1017,20 @@ const html = (res, ctx = {}) => {
 	// 每次发页面都换一个代号：/api/leave 只认自己那一代，旧页面的 beacon 晚到也不会误伤新页面
 	const gen = String((ctx.gen = (ctx.gen ?? 0) + 1));
 	let locale = "en";
-	try { locale = resolveLocale({ setting: settingsOf(loadState(DATA).state).language }); } catch {}
+	let theme = "auto";
+	try {
+		const s = settingsOf(loadState(DATA).state);
+		locale = resolveLocale({ setting: s.language });
+		theme = s.theme;
+	} catch {}
+	const colorScheme = theme === "dark" ? "dark" : theme === "light" ? "light" : "light dark";
+	const themeColor = theme === "dark" ? "#0B0F14" : "#F7F8FA";
 	const page = readResource("web/ui.html").toString("utf8")
-		.replace(/<html lang="[^"]*">/, `<html lang="${locale}">`)
+		.replace(/<html lang="[^"]*"[^>]*>/, `<html lang="${locale}" data-theme="${theme}">`)
+		.replace('<meta name="color-scheme" content="light dark">', `<meta name="color-scheme" content="${colorScheme}">`)
 		.replace('<meta name="ap-locale" content="">', `<meta name="ap-locale" content="${locale}">`)
+		.replace('<meta name="ap-theme" content="">', `<meta name="ap-theme" content="${theme}">`)
+		.replace('<meta name="theme-color" content="#F7F8FA">', `<meta name="theme-color" content="${themeColor}">`)
 		.replace('<meta name="ap-server-gen" content="">', `<meta name="ap-server-gen" content="${gen}">`);
 	return res
 		.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" })
